@@ -1,0 +1,89 @@
+#!/usr/bin/ruby
+require 'tempfile'
+
+IDLINE = "# ============================================================ "
+
+AROUND = (ENV["AROUND"] || 4).to_i
+FILTER = "| grep -v \\/\\\\.svn\\/ | grep -v \\\\.log: | grep -v \\\\.swp: "
+EDITOR = ENV["EDITOR"] || "vim -b "
+
+# Region of Interest.
+roi = Hash.new{[]}
+
+pattern = ARGV.shift.gsub(/'/, "\\'")
+
+%x(grep '#{pattern}' #{ARGV.join(' ')} --exclude=.svn* -Hn #{FILTER}).each do |line|
+  next unless /.*:.*:.*/ === line
+  filename,lineno = line.split(/:/)
+  lineno = [lineno.to_i - AROUND - 1, 0].max
+  roi[filename] <<= [lineno,lineno + AROUND * 2]
+end
+
+if roi.empty?
+  $stderr.puts "Not found"
+  exit
+end
+
+# Unify regions.
+roi.each do |k, regions|
+  sorted = regions.sort{|r1, r2| r1.min <=> r2.min}
+  roi[k] = sorted.inject([sorted.first]) do |r, v|
+    if r.last[1] + 1 >= v[0]
+      r.last[1] = v[1]
+    else
+      r << v
+    end
+    r
+  end
+end
+
+
+# Create a temporary file to edit ROI.
+tmp = Tempfile.new("grepedit.tmp", '.')
+
+at_exit { tmp.close(true) }
+
+roi = roi.to_a.sort{|e1,e2| e1[0] <=> e2[0]}
+
+roi.each do |filename, regions|
+  lines = open(filename).readlines
+  regions.each do |region|
+    tmp.puts "#{IDLINE}#{filename}"
+    tmp.puts lines[region[0]..region[1]]
+  end
+end
+
+# Launch editor.
+now = tmp.mtime
+
+tmp.close
+system("#{EDITOR} #{tmp.path}")
+tmp.open
+
+puts roi.map{|filename, regions| filename}.uniq
+exit if now == tmp.mtime
+
+# Parse the result.
+after = Hash.new{[]}
+
+tmp.read.inject("") do |filename, line|
+  if /^#{IDLINE}(.*)$/ === line
+    after[$1] <<= []
+    next $1
+  else
+    after[filename].last << line
+    next filename
+  end
+end
+
+# Update regions.
+roi.each do |filename, regions|
+  lines = open(filename).readlines
+  regions.each do |region|
+    # Fill region with nil.
+    lines[region[0]..region[1]] = [nil] * (region[1] - region[0] + 1)
+    # and put changed lines.
+    lines[region[0]] = after[filename].shift
+  end
+  open(filename, "w"){|file| file.puts lines.to_s}
+end
